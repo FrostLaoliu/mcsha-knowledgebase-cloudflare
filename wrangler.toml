@@ -8,8 +8,28 @@ database_name = "mcsha-codex-db"
 database_id = "957771f8-2a5c-454f-b390-6dd6c2322929"
 migrations_dir = "migrations"
 
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "mcsha-codex-assets"
+
 [vars]
 APP_NAME = "MC杀开发资料库"
 # 首次初始化管理员的凭据请使用 `wrangler secret put BOOTSTRAP_ADMIN_PASSWORD` 设置，
 # 不要把真实密码写进此文件或提交到 Git。
+BOOTSTRAP_ADMIN_USERNAME = "admin"
+
+# Preview environment: isolated test D1 database and test R2 bucket.
+[env.preview]
+[[env.preview.r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "mcsha-codex-test-assets"
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "mcsha-codex-test-db"
+database_id = "179a64ef-1f24-42ee-bc94-9e45c8210933"
+migrations_dir = "migrations"
+
+[env.preview.vars]
+APP_NAME = "MC杀开发资料库"
 BOOTSTRAP_ADMIN_USERNAME = "admin"

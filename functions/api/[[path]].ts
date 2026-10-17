@@ -2,6 +2,7 @@ interface Env {
   DB: D1Database;
   BOOTSTRAP_ADMIN_USERNAME?: string;
   BOOTSTRAP_ADMIN_PASSWORD?: string;
+  MEDIA_BUCKET?: R2Bucket;
 }
 interface User { id: string; username: string; role: "admin" | "member"; active: number; }
 const COOKIE = "mcsha_session";
@@ -10,6 +11,13 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
 });
 const fail = (message: string, status = 400) => json({ error: message }, status);
 const uid = () => crypto.randomUUID();
+function passwordRuleError(password: string) {
+  if (password.length < 12 || password.length > 128) return "密码长度须为 12-128 位";
+  if (/\s/.test(password)) return "密码不能包含空白字符";
+  const classes = [/[a-z]/.test(password), /[A-Z]/.test(password), /[0-9]/.test(password), /[^A-Za-z0-9]/.test(password)].filter(Boolean).length;
+  if (classes < 3) return "密码需至少包含小写字母、大写字母、数字、特殊字符中的三类";
+  return null;
+}
 const enc = new TextEncoder();
 const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const unb64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
@@ -44,8 +52,9 @@ async function currentUser(request: Request, env: Env): Promise<User | null> {
     .bind(await digest(token)).first<User>();
   return row ?? null;
 }
-function sessionCookie(token: string, maxAge: number) {
-  return `${COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+function sessionCookie(token: string, maxAge?: number) {
+  const duration = maxAge === undefined ? "" : `; Max-Age=${maxAge}`;
+  return `${COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/${duration}`;
 }
 async function ensureBootstrapAdmin(env: Env) {
   if (!env.BOOTSTRAP_ADMIN_PASSWORD || env.BOOTSTRAP_ADMIN_PASSWORD.length < 12) return;
@@ -60,6 +69,10 @@ const parse = async (request: Request) => {
 async function log(env: Env, user: User, action: string, type: string, id: string, title: string) {
   await env.DB.prepare("INSERT INTO activity_log (id,user_id,action,item_type,item_id,item_title) VALUES (?,?,?,?,?,?)")
     .bind(uid(), user.id, action, type, id, title).run();
+}
+async function ensureSourceCategory(env: Env, sourceType: "characters"|"playbooks", category: string) {
+  const module = await env.DB.prepare("SELECT id FROM modules WHERE source_type=? LIMIT 1").bind(sourceType).first<any>();
+  if (module?.id && category.trim()) await env.DB.prepare("INSERT OR IGNORE INTO module_categories (id,module_id,name,sort_order) VALUES (?,?,?,0)").bind(uid(), module.id, category.trim().slice(0,50)).run();
 }
 export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   const url = new URL(request.url);
@@ -77,10 +90,11 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
         .bind(body.username.trim()).first<any>();
       if (!user || !(await verifyPassword(body.password, user.password_hash))) return fail("账号或密码错误", 401);
       const token = b64(crypto.getRandomValues(new Uint8Array(32)));
-      await env.DB.prepare("INSERT INTO sessions (id_hash,user_id,expires_at) VALUES (?, ?, datetime('now', '+7 days'))")
-        .bind(await digest(token), user.id).run();
+      const remember = body.remember === true;
+      await env.DB.prepare("INSERT INTO sessions (id_hash,user_id,expires_at) VALUES (?, ?, datetime('now', ?))")
+        .bind(await digest(token), user.id, remember ? "+30 days" : "+1 day").run();
       return new Response(JSON.stringify({ user: { id: user.id, username: user.username, role: user.role } }), {
-        headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "set-cookie": sessionCookie(token, 604800) }
+        headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "set-cookie": sessionCookie(token, remember ? 2592000 : undefined) }
       });
     }
     if (path === "auth/logout" && method === "POST") {
@@ -91,6 +105,303 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
     const user = await currentUser(request, env);
     if (path === "auth/me" && method === "GET") return user ? json({ user }) : fail("请先登录", 401);
     if (!user) return fail("请先登录", 401);
+
+    // Images are stored in Cloudflare R2, not in D1. All routes require login;
+    // only admins can upload, list, or delete image assets.
+    const assetMatch = path.match(/^assets\/(img-[a-f0-9-]+\.(?:png|jpg|jpeg|webp|gif))$/i);
+    if (assetMatch && method === "GET") {
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置。管理员需要绑定 Cloudflare R2 存储桶。", 503);
+      const object = await env.MEDIA_BUCKET.get(assetMatch[1]);
+      if (!object) return fail("图片不存在", 404);
+      const headers = new Headers();
+      object.writeHttpMetadata(headers);
+      headers.set("etag", object.httpEtag);
+      headers.set("x-content-type-options", "nosniff");
+      headers.set("content-disposition", "inline");
+      headers.set("cache-control", "private, max-age=3600");
+      return new Response(object.body, { headers });
+    }
+
+    if (path === "assets" && method === "GET") {
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置", 503);
+      const result = await env.MEDIA_BUCKET.list({ prefix: "img-", limit: 100 });
+      const items = result.objects.map((object: R2Object) => ({
+        key: object.key,
+        url: `/api/assets/${object.key}`,
+        name: object.customMetadata?.originalName || object.key,
+        size: object.size,
+        uploaded_at: object.uploaded.toISOString()
+      }));
+      return json({ items, truncated: result.truncated });
+    }
+
+    if (path === "admin/assets" && method === "GET") {
+      if (user.role !== "admin") return fail("仅管理员可以管理图片资源", 403);
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      const result = await env.MEDIA_BUCKET.list({ prefix: "img-", limit: 100 });
+      const items = result.objects.map((object: R2Object) => ({
+        key: object.key,
+        url: `/api/assets/${object.key}`,
+        name: object.customMetadata?.originalName || object.key,
+        size: object.size,
+        uploaded_at: object.uploaded.toISOString()
+      }));
+      return json({ items, storageAvailable: true, truncated: result.truncated });
+    }
+
+    if (path === "admin/assets" && method === "POST") {
+      if (user.role !== "admin") return fail("仅管理员可以上传图片", 403);
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      let form: FormData;
+      try { form = await request.formData(); } catch { return fail("请选择要上传的图片"); }
+      const file = form.get("file");
+      if (!(file instanceof File)) return fail("上传内容中没有有效的图片文件");
+      const extensionByType: Record<string, string> = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+        "image/gif": "gif"
+      };
+      const extension = extensionByType[file.type];
+      if (!extension) return fail("仅支持 PNG、JPEG、WebP 或 GIF 图片");
+      const maxBytes = 5 * 1024 * 1024;
+      if (file.size <= 0) return fail("图片文件为空");
+      if (file.size > maxBytes) return fail("图片不能超过 5 MB");
+      // Do not trust the browser-provided MIME type alone: verify the file signature.
+      const signature = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+      const starts = (...bytes: number[]) => bytes.every((value, index) => signature[index] === value);
+      const isPng = starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+      const isJpeg = starts(0xff, 0xd8, 0xff);
+      const isGif = starts(0x47, 0x49, 0x46, 0x38, 0x37, 0x61) || starts(0x47, 0x49, 0x46, 0x38, 0x39, 0x61);
+      const isWebp = signature.length >= 12 && starts(0x52, 0x49, 0x46, 0x46) && signature[8] === 0x57 && signature[9] === 0x45 && signature[10] === 0x42 && signature[11] === 0x50;
+      const signatureMatches = extension === "png" ? isPng : extension === "jpg" ? isJpeg : extension === "gif" ? isGif : isWebp;
+      if (!signatureMatches) return fail("文件内容与图片格式不匹配，请重新选择 PNG、JPEG、WebP 或 GIF 图片");
+      const key = `img-${uid()}.${extension}`;
+      await env.MEDIA_BUCKET.put(key, file.stream(), {
+        httpMetadata: { contentType: file.type, cacheControl: "private, max-age=3600" },
+        customMetadata: {
+          originalName: file.name.slice(0, 160),
+          uploadedBy: user.username,
+          purpose: "admin-library"
+        }
+      });
+      await log(env, user, "上传图片", "图片资源", key, file.name.slice(0, 160) || key);
+      return json({
+        key,
+        url: `/api/assets/${key}`,
+        name: file.name.slice(0, 160) || key,
+        size: file.size,
+        uploaded_at: new Date().toISOString()
+      }, 201);
+    }
+
+    const deleteAssetMatch = path.match(/^admin\/assets\/(img-[a-f0-9-]+\.(?:png|jpg|jpeg|webp|gif))$/i);
+    if (deleteAssetMatch && method === "DELETE") {
+      if (user.role !== "admin") return fail("仅管理员可以删除图片资源", 403);
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      const key = deleteAssetMatch[1];
+      const object = await env.MEDIA_BUCKET.head(key);
+      if (!object) return fail("图片不存在", 404);
+      await env.MEDIA_BUCKET.delete(key);
+      await log(env, user, "删除图片", "图片资源", key, object.customMetadata?.originalName || key);
+      return json({ ok: true });
+    }
+
+    // Modular knowledge base metadata and schema management.
+    if (path === "modules" && method === "GET") {
+      const result = await env.DB.prepare("SELECT * FROM modules WHERE is_enabled = 1 OR ? = 'admin' ORDER BY sort_order, created_at").bind(user.role).all<any>();
+      const items = await Promise.all((result.results ?? []).map(async (module: any) => {
+        const [fields, categories, count] = await Promise.all([
+          env.DB.prepare("SELECT id,field_key,label,field_type,required,options_json,sort_order FROM module_fields WHERE module_id=? ORDER BY sort_order").bind(module.id).all(),
+          env.DB.prepare("SELECT id,name,sort_order FROM module_categories WHERE module_id=? ORDER BY sort_order,name").bind(module.id).all(),
+          module.source_type === "characters"
+            ? env.DB.prepare("SELECT COUNT(*) n FROM characters").first<any>()
+            : module.source_type === "playbooks"
+              ? env.DB.prepare("SELECT COUNT(*) n FROM playbooks").first<any>()
+              : env.DB.prepare("SELECT COUNT(*) n FROM module_entries WHERE module_id=?").bind(module.id).first<any>()
+        ]);
+        return { ...module, fields: fields.results ?? [], categories: categories.results ?? [], entry_count: count?.n ?? 0 };
+      }));
+      return json({ items });
+    }
+
+    if (path === "modules" && method === "POST") {
+      if (user.role !== "admin") return fail("仅管理员可以创建模块", 403);
+      const b = await parse(request);
+      const name = typeof b?.name === "string" ? b.name.trim() : "";
+      if (name.length < 2 || name.length > 40) return fail("模块名称需为 2-40 个字符");
+      const slug = typeof b?.slug === "string" && /^[a-z0-9-]{2,40}$/.test(b.slug)
+        ? b.slug
+        : `module-${uid().slice(0, 8)}`;
+      const id = uid();
+      const fields = Array.isArray(b.fields) ? b.fields.slice(0, 30) : [];
+      try {
+        await env.DB.prepare("INSERT INTO modules (id,name,slug,description,icon,source_type,sort_order,created_by) VALUES (?,?,?,?,?,'custom',?,?)")
+          .bind(id, name, slug, String(b.description || "").slice(0, 500), String(b.icon || "boxes").slice(0, 40), Number(b.sort_order) || 100, user.id).run();
+      } catch {
+        return fail("模块名称或标识已存在，或模块创建失败", 409);
+      }
+      for (let i = 0; i < fields.length; i++) {
+        const field = fields[i] ?? {};
+        const key = typeof field.field_key === "string" ? field.field_key.trim() : "";
+        const label = typeof field.label === "string" ? field.label.trim() : "";
+        const type = ["text", "textarea", "number", "list"].includes(field.field_type) ? field.field_type : "text";
+        if (!/^[a-zA-Z][a-zA-Z0-9_]{0,39}$/.test(key) || !label || label.length > 60) continue;
+        await env.DB.prepare("INSERT OR IGNORE INTO module_fields (id,module_id,field_key,label,field_type,required,options_json,sort_order) VALUES (?,?,?,?,?,?,?,?)")
+          .bind(uid(), id, key, label, type, field.required ? 1 : 0, JSON.stringify(Array.isArray(field.options) ? field.options.slice(0, 100) : []), i * 10).run();
+      }
+      await env.DB.prepare("INSERT OR IGNORE INTO module_categories (id,module_id,name) VALUES (?,?,?)")
+        .bind(uid(), id, "未分类").run();
+      await log(env, user, "创建模块", "模块", id, name);
+      return json({ id }, 201);
+    }
+
+    const moduleMatch = path.match(/^modules\/([^/]+)$/);
+    if (moduleMatch && method === "PUT") {
+      if (user.role !== "admin") return fail("仅管理员可以修改模块设置", 403);
+      const id = moduleMatch[1], b = await parse(request);
+      const existing = await env.DB.prepare("SELECT * FROM modules WHERE id=?").bind(id).first<any>();
+      if (!existing) return fail("模块不存在", 404);
+      const name = typeof b?.name === "string" ? b.name.trim() : existing.name;
+      if (name.length < 2 || name.length > 40) return fail("模块名称需为 2-40 个字符");
+      const description = typeof b?.description === "string" ? b.description.slice(0, 500) : existing.description;
+      const icon = typeof b?.icon === "string" ? b.icon.slice(0, 40) : existing.icon;
+      const sortOrder = Number.isFinite(Number(b?.sort_order)) ? Number(b.sort_order) : existing.sort_order;
+      const enabled = typeof b?.is_enabled === "boolean" ? (b.is_enabled ? 1 : 0) : existing.is_enabled;
+      try {
+        await env.DB.prepare("UPDATE modules SET name=?,description=?,icon=?,sort_order=?,is_enabled=?,updated_at=datetime('now') WHERE id=?")
+          .bind(name, description, icon, sortOrder, enabled, id).run();
+      } catch { return fail("模块设置保存失败", 409); }
+      if (existing.source_type === "custom" && Array.isArray(b?.fields)) {
+        const fields = b.fields.slice(0, 30);
+        const desiredKeys = new Set(fields.map((field: any) => typeof field?.field_key === "string" ? field.field_key.trim() : "").filter(Boolean));
+        const currentFields = await env.DB.prepare("SELECT field_key FROM module_fields WHERE module_id=?").bind(id).all<any>();
+        for (const current of currentFields.results ?? []) {
+          if (!desiredKeys.has(current.field_key)) {
+            await env.DB.prepare("DELETE FROM module_fields WHERE module_id=? AND field_key=?").bind(id, current.field_key).run();
+          }
+        }
+        for (let i = 0; i < fields.length; i++) {
+          const field = fields[i] ?? {};
+          const key = typeof field.field_key === "string" ? field.field_key.trim() : "";
+          const label = typeof field.label === "string" ? field.label.trim() : "";
+          if (!/^[a-zA-Z][a-zA-Z0-9_]{0,39}$/.test(key) || !label || label.length > 60) continue;
+          const type = ["text", "textarea", "number", "list"].includes(field.field_type) ? field.field_type : "text";
+          await env.DB.prepare("INSERT INTO module_fields (id,module_id,field_key,label,field_type,required,options_json,sort_order) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(module_id,field_key) DO UPDATE SET label=excluded.label,field_type=excluded.field_type,required=excluded.required,options_json=excluded.options_json,sort_order=excluded.sort_order")
+            .bind(uid(), id, key, label, type, field.required ? 1 : 0, JSON.stringify(Array.isArray(field.options) ? field.options.slice(0, 100) : []), i * 10).run();
+        }
+      }
+      await log(env, user, "修改模块", "模块", id, name);
+      return json({ ok: true });
+    }
+
+    const categoryCollection = path.match(/^modules\/([^/]+)\/categories$/);
+    if (categoryCollection && method === "POST") {
+      if (user.role !== "admin") return fail("仅管理员可以管理模块分类", 403);
+      const moduleId = categoryCollection[1], b = await parse(request);
+      const name = typeof b?.name === "string" ? b.name.trim() : "";
+      if (!name || name.length > 50) return fail("分类名称需为 1-50 个字符");
+      const module = await env.DB.prepare("SELECT id FROM modules WHERE id=?").bind(moduleId).first();
+      if (!module) return fail("模块不存在", 404);
+      const id = uid();
+      try {
+        await env.DB.prepare("INSERT INTO module_categories (id,module_id,name,sort_order) VALUES (?,?,?,?)")
+          .bind(id, moduleId, name, Number(b.sort_order) || 0).run();
+      } catch { return fail("该分类已存在", 409); }
+      return json({ id, name }, 201);
+    }
+
+    const categoryItem = path.match(/^modules\/([^/]+)\/categories\/([^/]+)$/);
+    if (categoryItem && method === "DELETE") {
+      if (user.role !== "admin") return fail("仅管理员可以管理模块分类", 403);
+      const [moduleId, categoryId] = [categoryItem[1], categoryItem[2]];
+      const category = await env.DB.prepare("SELECT name FROM module_categories WHERE id=? AND module_id=?").bind(categoryId, moduleId).first<any>();
+      if (!category) return fail("分类不存在", 404);
+      const module = await env.DB.prepare("SELECT source_type FROM modules WHERE id=?").bind(moduleId).first<any>();
+      const used = module?.source_type === "characters"
+        ? await env.DB.prepare("SELECT COUNT(*) n FROM characters WHERE category=?").bind(category.name).first<any>()
+        : module?.source_type === "playbooks"
+          ? await env.DB.prepare("SELECT COUNT(*) n FROM playbooks WHERE category=?").bind(category.name).first<any>()
+          : await env.DB.prepare("SELECT COUNT(*) n FROM module_entries WHERE module_id=? AND category=?").bind(moduleId, category.name).first<any>();
+      if ((used?.n ?? 0) > 0) return fail("该分类仍被资料使用，请先调整相关资料的分类", 409);
+      await env.DB.prepare("DELETE FROM module_categories WHERE id=? AND module_id=?").bind(categoryId, moduleId).run();
+      return json({ ok: true });
+    }
+
+    const moduleEntries = path.match(/^modules\/([^/]+)\/entries$/);
+    if (moduleEntries && method === "GET") {
+      const moduleId = moduleEntries[1];
+      const module = await env.DB.prepare("SELECT * FROM modules WHERE id=? AND is_enabled=1").bind(moduleId).first<any>();
+      if (!module) return fail("模块不存在或已停用", 404);
+      if (module.source_type === "characters") {
+        const result = await env.DB.prepare("SELECT c.*, creator.username AS creator_name, (SELECT COUNT(*) FROM character_versions v WHERE v.character_id=c.id) AS version_count FROM characters c JOIN users creator ON creator.id=c.created_by ORDER BY c.updated_at DESC").all<any>();
+        const items = await Promise.all((result.results ?? []).map(async (c: any) => {
+          const traits = await env.DB.prepare("SELECT id,name,effect,introduction FROM traits WHERE character_id=? ORDER BY sort_order,id").bind(c.id).all();
+          return { ...c, title: c.name, content: { name: c.name, health: c.health, description: c.description, traits: traits.results ?? [] } };
+        }));
+        return json({ items });
+      }
+      if (module.source_type === "playbooks") {
+        const result = await env.DB.prepare("SELECT p.*, creator.username AS creator_name, (SELECT COUNT(*) FROM playbook_versions v WHERE v.playbook_id=p.id) AS version_count FROM playbooks p JOIN users creator ON creator.id=p.created_by ORDER BY p.updated_at DESC").all<any>();
+        return json({ items: (result.results ?? []).map((p: any) => ({ ...p, title: p.title, content: { title: p.title, summary: p.summary, steps: JSON.parse(p.steps_json || "[]"), notes: p.notes } })) });
+      }
+      const result = await env.DB.prepare("SELECT e.*, creator.username AS creator_name, editor.username AS editor_name, (SELECT COUNT(*) FROM module_entry_versions v WHERE v.entry_id=e.id) AS version_count FROM module_entries e JOIN users creator ON creator.id=e.created_by LEFT JOIN users editor ON editor.id=e.updated_by WHERE e.module_id=? ORDER BY e.updated_at DESC")
+        .bind(moduleId).all<any>();
+      return json({ items: (result.results ?? []).map((entry: any) => ({ ...entry, content: JSON.parse(entry.content_json || "{}") })) });
+    }
+
+    if (moduleEntries && method === "POST") {
+      const moduleId = moduleEntries[1], b = await parse(request);
+      const module = await env.DB.prepare("SELECT * FROM modules WHERE id=? AND is_enabled=1").bind(moduleId).first<any>();
+      if (!module) return fail("模块不存在或已停用", 404);
+      if (module.source_type !== "custom") return fail("该模块使用专用编辑器，请从对应资料页面创建", 400);
+      const title = typeof b?.title === "string" ? b.title.trim() : "";
+      if (!title || title.length > 160) return fail("资料标题需为 1-160 个字符");
+      const content = b?.content && typeof b.content === "object" && !Array.isArray(b.content) ? b.content : {};
+      const fieldResult = await env.DB.prepare("SELECT field_key,label,field_type,required FROM module_fields WHERE module_id=?").bind(moduleId).all<any>();
+      for (const field of fieldResult.results ?? []) {
+        const value = content[field.field_key];
+        if (field.required && (value === undefined || value === null || String(value).trim() === "")) return fail(`请填写必填字段：${field.label}`);
+      }
+      const id = uid(), category = String(b.category || "未分类").trim().slice(0, 50);
+      const categoryExists = await env.DB.prepare("SELECT 1 FROM module_categories WHERE module_id=? AND name=?").bind(moduleId, category).first();
+      if (!categoryExists) await env.DB.prepare("INSERT OR IGNORE INTO module_categories (id,module_id,name,sort_order) VALUES (?,?,?,0)").bind(uid(), moduleId, category).run();
+      const snapshot = { title, category, content };
+      await env.DB.prepare("INSERT INTO module_entries (id,module_id,title,category,content_json,created_by,updated_by) VALUES (?,?,?,?,?,?,?)")
+        .bind(id, moduleId, title, category, JSON.stringify(content), user.id, user.id).run();
+      await env.DB.prepare("INSERT INTO module_entry_versions (id,entry_id,version_number,snapshot_json,editor_id,edit_note) VALUES (?,?,1,?,?,?)")
+        .bind(uid(), id, JSON.stringify(snapshot), user.id, String(b.edit_note || "创建资料").slice(0, 300)).run();
+      await log(env, user, "创建", "资料", id, title);
+      return json({ id }, 201);
+    }
+
+    const moduleEntryItem = path.match(/^modules\/([^/]+)\/entries\/([^/]+)$/);
+    if (moduleEntryItem && method === "PUT") {
+      const [moduleId, entryId] = [moduleEntryItem[1], moduleEntryItem[2]], b = await parse(request);
+      const module = await env.DB.prepare("SELECT source_type FROM modules WHERE id=? AND is_enabled=1").bind(moduleId).first<any>();
+      if (!module || module.source_type !== "custom") return fail("仅支持编辑自定义模块中的资料", 400);
+      const old = await env.DB.prepare("SELECT * FROM module_entries WHERE id=? AND module_id=?").bind(entryId, moduleId).first<any>();
+      if (!old) return fail("资料不存在", 404);
+      const title = typeof b?.title === "string" ? b.title.trim() : old.title;
+      if (!title || title.length > 160) return fail("资料标题需为 1-160 个字符");
+      const content = b?.content && typeof b.content === "object" && !Array.isArray(b.content) ? b.content : JSON.parse(old.content_json || "{}");
+      const fieldResult = await env.DB.prepare("SELECT field_key,label,required FROM module_fields WHERE module_id=?").bind(moduleId).all<any>();
+      for (const field of fieldResult.results ?? []) {
+        const value = content[field.field_key];
+        if (field.required && (value === undefined || value === null || String(value).trim() === "")) return fail(`请填写必填字段：${field.label}`);
+      }
+      const category = String(b?.category ?? old.category).trim().slice(0, 50);
+      const categoryExists = await env.DB.prepare("SELECT 1 FROM module_categories WHERE module_id=? AND name=?").bind(moduleId, category).first();
+      if (!categoryExists) await env.DB.prepare("INSERT OR IGNORE INTO module_categories (id,module_id,name,sort_order) VALUES (?,?,?,0)").bind(uid(), moduleId, category).run();
+      const next = await env.DB.prepare("SELECT COALESCE(MAX(version_number),0)+1 n FROM module_entry_versions WHERE entry_id=?").bind(entryId).first<any>();
+      const snapshot = { title, category, content };
+      await env.DB.prepare("UPDATE module_entries SET title=?,category=?,content_json=?,updated_by=?,updated_at=datetime('now') WHERE id=?")
+        .bind(title, category, JSON.stringify(content), user.id, entryId).run();
+      await env.DB.prepare("INSERT INTO module_entry_versions (id,entry_id,version_number,snapshot_json,editor_id,edit_note) VALUES (?,?,?,?,?,?)")
+        .bind(uid(), entryId, next?.n ?? 1, JSON.stringify(snapshot), user.id, String(b?.edit_note || "更新资料").slice(0, 300)).run();
+      await log(env, user, "编辑", "资料", entryId, title);
+      return json({ ok: true });
+    }
 
     if (path === "dashboard" && method === "GET") {
       const [characters, playbooks, users, recent] = await Promise.all([
@@ -120,6 +431,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const id = uid(), name = b.name.trim();
       const snapshot = { name, health: Math.max(0, Math.min(999, Number(b.health) || 4)), category: String(b.category || "未分类"), description: String(b.description || ""), traits: Array.isArray(b.traits) ? b.traits.slice(0, 30) : [] };
       await env.DB.prepare("INSERT INTO characters (id,name,health,category,description,created_by) VALUES (?,?,?,?,?,?)").bind(id, snapshot.name, snapshot.health, snapshot.category, snapshot.description, user.id).run();
+      await ensureSourceCategory(env, "characters", snapshot.category);
       for (let i=0;i<snapshot.traits.length;i++) {
         const t = snapshot.traits[i] ?? {};
         await env.DB.prepare("INSERT INTO traits (id,character_id,name,effect,introduction,sort_order) VALUES (?,?,?,?,?,?)")
@@ -140,6 +452,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const snapshot = { name:b.name.trim(), health:Math.max(0,Math.min(999,Number(b.health)||4)), category:String(b.category||"未分类"), description:String(b.description||""), traits };
       const next = await env.DB.prepare("SELECT COALESCE(MAX(version_number),0)+1 n FROM character_versions WHERE character_id=?").bind(id).first<any>();
       await env.DB.prepare("UPDATE characters SET name=?,health=?,category=?,description=?,updated_at=datetime('now') WHERE id=?").bind(snapshot.name,snapshot.health,snapshot.category,snapshot.description,id).run();
+      await ensureSourceCategory(env, "characters", snapshot.category);
       await env.DB.prepare("DELETE FROM traits WHERE character_id=?").bind(id).run();
       for (let i=0;i<traits.length;i++) { const t=traits[i]??{}; await env.DB.prepare("INSERT INTO traits (id,character_id,name,effect,introduction,sort_order) VALUES (?,?,?,?,?,?)").bind(uid(),id,String(t.name||"未命名词条"),String(t.effect||""),String(t.introduction||""),i).run(); }
       await env.DB.prepare("INSERT INTO character_versions (id,character_id,version_number,snapshot_json,edited_by,edit_note) VALUES (?,?,?,?,?,?)")
@@ -165,6 +478,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const b=await parse(request); if(!b||typeof b.title!=="string"||!b.title.trim()) return fail("玩法名称不能为空");
       const id=uid(), snap={title:b.title.trim(),category:String(b.category||"未分类"),summary:String(b.summary||""),steps:Array.isArray(b.steps)?b.steps.slice(0,60):[],notes:String(b.notes||"")};
       await env.DB.prepare("INSERT INTO playbooks (id,title,category,summary,steps_json,notes,created_by) VALUES (?,?,?,?,?,?,?)").bind(id,snap.title,snap.category,snap.summary,JSON.stringify(snap.steps),snap.notes,user.id).run();
+      await ensureSourceCategory(env, "playbooks", snap.category);
       await env.DB.prepare("INSERT INTO playbook_versions (id,playbook_id,version_number,snapshot_json,edited_by,edit_note) VALUES (?,?,1,?,?,?)").bind(uid(),id,JSON.stringify(snap),user.id,String(b.editNote||"创建玩法流程")).run();
       await log(env,user,"创建","玩法",id,snap.title); return json({id},201);
     }
@@ -175,6 +489,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const snap={title:b.title.trim(),category:String(b.category||"未分类"),summary:String(b.summary||""),steps:Array.isArray(b.steps)?b.steps.slice(0,60):[],notes:String(b.notes||"")};
       const next=await env.DB.prepare("SELECT COALESCE(MAX(version_number),0)+1 n FROM playbook_versions WHERE playbook_id=?").bind(id).first<any>();
       await env.DB.prepare("UPDATE playbooks SET title=?,category=?,summary=?,steps_json=?,notes=?,updated_at=datetime('now') WHERE id=?").bind(snap.title,snap.category,snap.summary,JSON.stringify(snap.steps),snap.notes,id).run();
+      await ensureSourceCategory(env, "playbooks", snap.category);
       await env.DB.prepare("INSERT INTO playbook_versions (id,playbook_id,version_number,snapshot_json,edited_by,edit_note) VALUES (?,?,?,?,?,?)").bind(uid(),id,next?.n??1,JSON.stringify(snap),user.id,String(b.editNote||"更新玩法流程")).run();
       await log(env,user,"编辑","玩法",id,snap.title); return json({ok:true});
     }
@@ -193,7 +508,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       if(!b||typeof b.username!=="string"||typeof b.password!=="string") return fail("请填写账号和密码");
       const username=b.username.trim();
       if(!/^[a-zA-Z0-9_-]{3,24}$/.test(username)) return fail("账号需为 3-24 位字母、数字、下划线或连字符");
-      if(b.password.length<12||b.password.length>128) return fail("密码长度须为 12-128 位");
+      const passwordError = passwordRuleError(b.password); if(passwordError) return fail(passwordError);
       try { await env.DB.prepare("INSERT INTO users (id,username,password_hash,role) VALUES (?,?,?,'member')").bind(uid(),username,await hashPassword(b.password)).run(); }
       catch { return fail("账号已存在或创建失败",409); }
       await log(env,user,"创建账号","账号",username,username); return json({ok:true},201);
@@ -208,7 +523,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
         await env.DB.prepare("UPDATE users SET active=? WHERE id=?").bind(action==="enable"?1:0,target).run();
         if(action==="disable") await env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(target).run();
       } else {
-        if(typeof b?.password!=="string"||b.password.length<12||b.password.length>128) return fail("新密码长度须为 12-128 位");
+        if(typeof b?.password!=="string") return fail("请填写新密码"); const passwordError = passwordRuleError(b.password); if(passwordError) return fail(passwordError);
         await env.DB.prepare("UPDATE users SET password_hash=? WHERE id=?").bind(await hashPassword(b.password),target).run();
         await env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(target).run();
       }
