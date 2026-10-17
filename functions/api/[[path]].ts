@@ -94,7 +94,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
 
     // Modular knowledge base metadata and schema management.
     if (path === "modules" && method === "GET") {
-      const result = await env.DB.prepare("SELECT * FROM modules WHERE is_enabled = 1 ORDER BY sort_order, created_at").all<any>();
+      const result = await env.DB.prepare("SELECT * FROM modules WHERE is_enabled = 1 OR ? = 'admin' ORDER BY sort_order, created_at").bind(user.role).all<any>();
       const items = await Promise.all((result.results ?? []).map(async (module: any) => {
         const [fields, categories, count] = await Promise.all([
           env.DB.prepare("SELECT id,field_key,label,field_type,required,options_json,sort_order FROM module_fields WHERE module_id=? ORDER BY sort_order").bind(module.id).all(),
@@ -159,6 +159,13 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       } catch { return fail("模块设置保存失败", 409); }
       if (existing.source_type === "custom" && Array.isArray(b?.fields)) {
         const fields = b.fields.slice(0, 30);
+        const desiredKeys = new Set(fields.map((field: any) => typeof field?.field_key === "string" ? field.field_key.trim() : "").filter(Boolean));
+        const currentFields = await env.DB.prepare("SELECT field_key FROM module_fields WHERE module_id=?").bind(id).all<any>();
+        for (const current of currentFields.results ?? []) {
+          if (!desiredKeys.has(current.field_key)) {
+            await env.DB.prepare("DELETE FROM module_fields WHERE module_id=? AND field_key=?").bind(id, current.field_key).run();
+          }
+        }
         for (let i = 0; i < fields.length; i++) {
           const field = fields[i] ?? {};
           const key = typeof field.field_key === "string" ? field.field_key.trim() : "";
