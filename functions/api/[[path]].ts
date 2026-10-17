@@ -52,8 +52,9 @@ async function currentUser(request: Request, env: Env): Promise<User | null> {
     .bind(await digest(token)).first<User>();
   return row ?? null;
 }
-function sessionCookie(token: string, maxAge: number) {
-  return `${COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+function sessionCookie(token: string, maxAge?: number) {
+  const duration = maxAge === undefined ? "" : `; Max-Age=${maxAge}`;
+  return `${COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/${duration}`;
 }
 async function ensureBootstrapAdmin(env: Env) {
   if (!env.BOOTSTRAP_ADMIN_PASSWORD || env.BOOTSTRAP_ADMIN_PASSWORD.length < 12) return;
@@ -68,6 +69,10 @@ const parse = async (request: Request) => {
 async function log(env: Env, user: User, action: string, type: string, id: string, title: string) {
   await env.DB.prepare("INSERT INTO activity_log (id,user_id,action,item_type,item_id,item_title) VALUES (?,?,?,?,?,?)")
     .bind(uid(), user.id, action, type, id, title).run();
+}
+async function ensureSourceCategory(env: Env, sourceType: "characters"|"playbooks", category: string) {
+  const module = await env.DB.prepare("SELECT id FROM modules WHERE source_type=? LIMIT 1").bind(sourceType).first<any>();
+  if (module?.id && category.trim()) await env.DB.prepare("INSERT OR IGNORE INTO module_categories (id,module_id,name,sort_order) VALUES (?,?,?,0)").bind(uid(), module.id, category.trim().slice(0,50)).run();
 }
 export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   const url = new URL(request.url);
@@ -85,10 +90,11 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
         .bind(body.username.trim()).first<any>();
       if (!user || !(await verifyPassword(body.password, user.password_hash))) return fail("账号或密码错误", 401);
       const token = b64(crypto.getRandomValues(new Uint8Array(32)));
-      await env.DB.prepare("INSERT INTO sessions (id_hash,user_id,expires_at) VALUES (?, ?, datetime('now', '+7 days'))")
-        .bind(await digest(token), user.id).run();
+      const remember = body.remember === true;
+      await env.DB.prepare("INSERT INTO sessions (id_hash,user_id,expires_at) VALUES (?, ?, datetime('now', ?))")
+        .bind(await digest(token), user.id, remember ? "+30 days" : "+1 day").run();
       return new Response(JSON.stringify({ user: { id: user.id, username: user.username, role: user.role } }), {
-        headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "set-cookie": sessionCookie(token, 604800) }
+        headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "set-cookie": sessionCookie(token, remember ? 2592000 : undefined) }
       });
     }
     if (path === "auth/logout" && method === "POST") {
@@ -359,7 +365,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       }
       const id = uid(), category = String(b.category || "未分类").trim().slice(0, 50);
       const categoryExists = await env.DB.prepare("SELECT 1 FROM module_categories WHERE module_id=? AND name=?").bind(moduleId, category).first();
-      if (!categoryExists) return fail("请选择该模块中已存在的分类");
+      if (!categoryExists) await env.DB.prepare("INSERT OR IGNORE INTO module_categories (id,module_id,name,sort_order) VALUES (?,?,?,0)").bind(uid(), moduleId, category).run();
       const snapshot = { title, category, content };
       await env.DB.prepare("INSERT INTO module_entries (id,module_id,title,category,content_json,created_by,updated_by) VALUES (?,?,?,?,?,?,?)")
         .bind(id, moduleId, title, category, JSON.stringify(content), user.id, user.id).run();
@@ -386,7 +392,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       }
       const category = String(b?.category ?? old.category).trim().slice(0, 50);
       const categoryExists = await env.DB.prepare("SELECT 1 FROM module_categories WHERE module_id=? AND name=?").bind(moduleId, category).first();
-      if (!categoryExists) return fail("请选择该模块中已存在的分类");
+      if (!categoryExists) await env.DB.prepare("INSERT OR IGNORE INTO module_categories (id,module_id,name,sort_order) VALUES (?,?,?,0)").bind(uid(), moduleId, category).run();
       const next = await env.DB.prepare("SELECT COALESCE(MAX(version_number),0)+1 n FROM module_entry_versions WHERE entry_id=?").bind(entryId).first<any>();
       const snapshot = { title, category, content };
       await env.DB.prepare("UPDATE module_entries SET title=?,category=?,content_json=?,updated_by=?,updated_at=datetime('now') WHERE id=?")
@@ -425,6 +431,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const id = uid(), name = b.name.trim();
       const snapshot = { name, health: Math.max(0, Math.min(999, Number(b.health) || 4)), category: String(b.category || "未分类"), description: String(b.description || ""), traits: Array.isArray(b.traits) ? b.traits.slice(0, 30) : [] };
       await env.DB.prepare("INSERT INTO characters (id,name,health,category,description,created_by) VALUES (?,?,?,?,?,?)").bind(id, snapshot.name, snapshot.health, snapshot.category, snapshot.description, user.id).run();
+      await ensureSourceCategory(env, "characters", snapshot.category);
       for (let i=0;i<snapshot.traits.length;i++) {
         const t = snapshot.traits[i] ?? {};
         await env.DB.prepare("INSERT INTO traits (id,character_id,name,effect,introduction,sort_order) VALUES (?,?,?,?,?,?)")
@@ -445,6 +452,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const snapshot = { name:b.name.trim(), health:Math.max(0,Math.min(999,Number(b.health)||4)), category:String(b.category||"未分类"), description:String(b.description||""), traits };
       const next = await env.DB.prepare("SELECT COALESCE(MAX(version_number),0)+1 n FROM character_versions WHERE character_id=?").bind(id).first<any>();
       await env.DB.prepare("UPDATE characters SET name=?,health=?,category=?,description=?,updated_at=datetime('now') WHERE id=?").bind(snapshot.name,snapshot.health,snapshot.category,snapshot.description,id).run();
+      await ensureSourceCategory(env, "characters", snapshot.category);
       await env.DB.prepare("DELETE FROM traits WHERE character_id=?").bind(id).run();
       for (let i=0;i<traits.length;i++) { const t=traits[i]??{}; await env.DB.prepare("INSERT INTO traits (id,character_id,name,effect,introduction,sort_order) VALUES (?,?,?,?,?,?)").bind(uid(),id,String(t.name||"未命名词条"),String(t.effect||""),String(t.introduction||""),i).run(); }
       await env.DB.prepare("INSERT INTO character_versions (id,character_id,version_number,snapshot_json,edited_by,edit_note) VALUES (?,?,?,?,?,?)")
@@ -470,6 +478,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const b=await parse(request); if(!b||typeof b.title!=="string"||!b.title.trim()) return fail("玩法名称不能为空");
       const id=uid(), snap={title:b.title.trim(),category:String(b.category||"未分类"),summary:String(b.summary||""),steps:Array.isArray(b.steps)?b.steps.slice(0,60):[],notes:String(b.notes||"")};
       await env.DB.prepare("INSERT INTO playbooks (id,title,category,summary,steps_json,notes,created_by) VALUES (?,?,?,?,?,?,?)").bind(id,snap.title,snap.category,snap.summary,JSON.stringify(snap.steps),snap.notes,user.id).run();
+      await ensureSourceCategory(env, "playbooks", snap.category);
       await env.DB.prepare("INSERT INTO playbook_versions (id,playbook_id,version_number,snapshot_json,edited_by,edit_note) VALUES (?,?,1,?,?,?)").bind(uid(),id,JSON.stringify(snap),user.id,String(b.editNote||"创建玩法流程")).run();
       await log(env,user,"创建","玩法",id,snap.title); return json({id},201);
     }
@@ -480,6 +489,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const snap={title:b.title.trim(),category:String(b.category||"未分类"),summary:String(b.summary||""),steps:Array.isArray(b.steps)?b.steps.slice(0,60):[],notes:String(b.notes||"")};
       const next=await env.DB.prepare("SELECT COALESCE(MAX(version_number),0)+1 n FROM playbook_versions WHERE playbook_id=?").bind(id).first<any>();
       await env.DB.prepare("UPDATE playbooks SET title=?,category=?,summary=?,steps_json=?,notes=?,updated_at=datetime('now') WHERE id=?").bind(snap.title,snap.category,snap.summary,JSON.stringify(snap.steps),snap.notes,id).run();
+      await ensureSourceCategory(env, "playbooks", snap.category);
       await env.DB.prepare("INSERT INTO playbook_versions (id,playbook_id,version_number,snapshot_json,edited_by,edit_note) VALUES (?,?,?,?,?,?)").bind(uid(),id,next?.n??1,JSON.stringify(snap),user.id,String(b.editNote||"更新玩法流程")).run();
       await log(env,user,"编辑","玩法",id,snap.title); return json({ok:true});
     }
