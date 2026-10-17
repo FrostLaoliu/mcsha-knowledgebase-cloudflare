@@ -270,7 +270,9 @@ button,.module-card,.theme-card{transition:background-color .16s ease,border-col
 .module-card,.module-manage-card,.custom-entry-card,.playbook-card{background:color-mix(in srgb,var(--theme-panel) var(--panel-transparency),transparent)}
 .module-card:hover,.module-manage-card:hover,.custom-entry-card:hover,.playbook-card:hover{border-color:color-mix(in srgb,var(--theme-accent) 60%,#30313c)}
 .hero-panel{border-color:color-mix(in srgb,var(--theme-accent) 34%,#30313c)}
-.hero-copy h2 span,.heading-dot{color:var(--theme-accent)}
+.hero-copy h2 span,.heading-dot,.hero-link,.text-button{color:var(--theme-accent)}
+.primary{background:var(--theme-accent);border-color:var(--theme-accent);box-shadow:0 4px 18px color-mix(in srgb,var(--theme-accent) 14%,transparent)}
+.primary:hover{background:var(--theme-accent);filter:brightness(1.08)}
 .module-icon,.module-entry-count,.category-chip{border-color:color-mix(in srgb,var(--theme-accent) 28%,#39313f)}
 .asset-upload-copy input[type=file],.asset-native-file-input{display:none!important}
 .selected-image-preview{display:flex;align-items:center;gap:12px;margin:12px 0;padding:10px;border:1px solid color-mix(in srgb,var(--theme-accent) 35%,#383440);border-radius:9px;background:color-mix(in srgb,var(--theme-accent) 7%,#14151b)}
