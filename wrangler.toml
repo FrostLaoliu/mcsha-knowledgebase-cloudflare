@@ -18,7 +18,7 @@ APP_NAME = "MC杀开发资料库"
 # 不要把真实密码写进此文件或提交到 Git。
 BOOTSTRAP_ADMIN_USERNAME = "admin"
 
-# Preview environment: isolated test database; R2 disabled until test bucket is ready.
+# Preview environment: isolated test D1 database and test R2 bucket.
 [env.preview]
 [[env.preview.r2_buckets]]
 binding = "MEDIA_BUCKET"
