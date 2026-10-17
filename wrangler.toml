@@ -8,6 +8,10 @@ database_name = "mcsha-codex-db"
 database_id = "957771f8-2a5c-454f-b390-6dd6c2322929"
 migrations_dir = "migrations"
 
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "mcsha-codex-assets"
+
 [vars]
 APP_NAME = "MC杀开发资料库"
 # 首次初始化管理员的凭据请使用 `wrangler secret put BOOTSTRAP_ADMIN_PASSWORD` 设置，
