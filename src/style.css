@@ -117,3 +117,18 @@ button,.module-card,.theme-card{transition:background-color .16s ease,border-col
 @media(max-width:900px){.theme-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.profile-detail-grid{grid-template-columns:1fr}}
 @media(max-width:560px){.user-menu-popover{right:12px;top:58px;width:min(228px,calc(100vw - 24px))}.settings-section{padding:15px}.settings-section-heading{align-items:flex-start;flex-direction:column}.wallpaper-placeholder{flex-wrap:wrap}.wallpaper-preview{width:78px;height:56px}.profile-panel{align-items:flex-start;flex-wrap:wrap}.profile-role-tag{margin-left:74px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+/* Theme accent application and motion preference */
+:root[data-theme="ocean"] .primary,:root[data-theme="ocean"] .hero-link{background:#70bfff;color:#101821}
+:root[data-theme="emerald"] .primary,:root[data-theme="emerald"] .hero-link{background:#72d8b0;color:#112019}
+:root[data-theme="ember"] .primary,:root[data-theme="ember"] .hero-link{background:#ffb16c;color:#25170d}
+:root[data-theme="ocean"] .primary:hover,:root[data-theme="emerald"] .primary:hover,:root[data-theme="ember"] .primary:hover{filter:brightness(1.07)}
+:root[data-theme="ocean"] .nav-item.active{background:#1d3446;border-color:#31516b;color:#a8d9ff}
+:root[data-theme="emerald"] .nav-item.active{background:#1f3a32;border-color:#365d4e;color:#9ae9cd}
+:root[data-theme="ember"] .nav-item.active{background:#432f25;border-color:#704a31;color:#ffd0a3}
+.motion-setting-hint{display:block;font-size:10px;color:#8f93a3;margin-top:5px;line-height:1.6}
+.motion-toggle{display:inline-flex;align-items:center;gap:8px;border:1px solid #41434f;background:#20222b;color:#9b9ead;border-radius:999px;padding:5px 10px;font-size:10px;white-space:nowrap}
+.motion-toggle>span{width:7px;height:7px;border-radius:50%;background:#767989}
+.motion-toggle.enabled{border-color:color-mix(in srgb,var(--theme-accent) 45%,#41434f);color:var(--theme-accent)}
+.motion-toggle.enabled>span{background:var(--theme-accent);box-shadow:0 0 9px color-mix(in srgb,var(--theme-accent) 55%,transparent)}
+:root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
