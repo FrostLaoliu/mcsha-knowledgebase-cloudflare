@@ -255,7 +255,9 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
         const value = content[field.field_key];
         if (field.required && (value === undefined || value === null || String(value).trim() === "")) return fail(`请填写必填字段：${field.label}`);
       }
-      const id = uid(), category = String(b.category || "未分类").slice(0, 50);
+      const id = uid(), category = String(b.category || "未分类").trim().slice(0, 50);
+      const categoryExists = await env.DB.prepare("SELECT 1 FROM module_categories WHERE module_id=? AND name=?").bind(moduleId, category).first();
+      if (!categoryExists) return fail("请选择该模块中已存在的分类");
       const snapshot = { title, category, content };
       await env.DB.prepare("INSERT INTO module_entries (id,module_id,title,category,content_json,created_by,updated_by) VALUES (?,?,?,?,?,?,?)")
         .bind(id, moduleId, title, category, JSON.stringify(content), user.id, user.id).run();
@@ -280,7 +282,9 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
         const value = content[field.field_key];
         if (field.required && (value === undefined || value === null || String(value).trim() === "")) return fail(`请填写必填字段：${field.label}`);
       }
-      const category = String(b?.category ?? old.category).slice(0, 50);
+      const category = String(b?.category ?? old.category).trim().slice(0, 50);
+      const categoryExists = await env.DB.prepare("SELECT 1 FROM module_categories WHERE module_id=? AND name=?").bind(moduleId, category).first();
+      if (!categoryExists) return fail("请选择该模块中已存在的分类");
       const next = await env.DB.prepare("SELECT COALESCE(MAX(version_number),0)+1 n FROM module_entry_versions WHERE entry_id=?").bind(entryId).first<any>();
       const snapshot = { title, category, content };
       await env.DB.prepare("UPDATE module_entries SET title=?,category=?,content_json=?,updated_by=?,updated_at=datetime('now') WHERE id=?")
