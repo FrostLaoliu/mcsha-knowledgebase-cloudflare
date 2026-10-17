@@ -10,6 +10,13 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
 });
 const fail = (message: string, status = 400) => json({ error: message }, status);
 const uid = () => crypto.randomUUID();
+function passwordRuleError(password: string) {
+  if (password.length < 12 || password.length > 128) return "密码长度须为 12-128 位";
+  if (/\s/.test(password)) return "密码不能包含空白字符";
+  const classes = [/[a-z]/.test(password), /[A-Z]/.test(password), /[0-9]/.test(password), /[^A-Za-z0-9]/.test(password)].filter(Boolean).length;
+  if (classes < 3) return "密码需至少包含小写字母、大写字母、数字、特殊字符中的三类";
+  return null;
+}
 const enc = new TextEncoder();
 const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const unb64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
@@ -385,7 +392,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       if(!b||typeof b.username!=="string"||typeof b.password!=="string") return fail("请填写账号和密码");
       const username=b.username.trim();
       if(!/^[a-zA-Z0-9_-]{3,24}$/.test(username)) return fail("账号需为 3-24 位字母、数字、下划线或连字符");
-      if(b.password.length<12||b.password.length>128) return fail("密码长度须为 12-128 位");
+      const passwordError = passwordRuleError(b.password); if(passwordError) return fail(passwordError);
       try { await env.DB.prepare("INSERT INTO users (id,username,password_hash,role) VALUES (?,?,?,'member')").bind(uid(),username,await hashPassword(b.password)).run(); }
       catch { return fail("账号已存在或创建失败",409); }
       await log(env,user,"创建账号","账号",username,username); return json({ok:true},201);
@@ -400,7 +407,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
         await env.DB.prepare("UPDATE users SET active=? WHERE id=?").bind(action==="enable"?1:0,target).run();
         if(action==="disable") await env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(target).run();
       } else {
-        if(typeof b?.password!=="string"||b.password.length<12||b.password.length>128) return fail("新密码长度须为 12-128 位");
+        if(typeof b?.password!=="string") return fail("请填写新密码"); const passwordError = passwordRuleError(b.password); if(passwordError) return fail(passwordError);
         await env.DB.prepare("UPDATE users SET password_hash=? WHERE id=?").bind(await hashPassword(b.password),target).run();
         await env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(target).run();
       }
