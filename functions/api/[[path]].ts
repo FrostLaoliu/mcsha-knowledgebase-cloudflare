@@ -2,6 +2,7 @@ interface Env {
   DB: D1Database;
   BOOTSTRAP_ADMIN_USERNAME?: string;
   BOOTSTRAP_ADMIN_PASSWORD?: string;
+  ASSETS?: R2Bucket;
 }
 interface User { id: string; username: string; role: "admin" | "member"; active: number; }
 const COOKIE = "mcsha_session";
@@ -98,6 +99,85 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
     const user = await currentUser(request, env);
     if (path === "auth/me" && method === "GET") return user ? json({ user }) : fail("请先登录", 401);
     if (!user) return fail("请先登录", 401);
+
+    // Images are stored in Cloudflare R2, not in D1. All routes require login;
+    // only admins can upload, list, or delete image assets.
+    const assetMatch = path.match(/^assets\/(img-[a-f0-9-]+\.(?:png|jpg|jpeg|webp|gif))$/i);
+    if (assetMatch && method === "GET") {
+      if (!env.ASSETS) return fail("图片存储尚未配置。管理员需要绑定 Cloudflare R2 存储桶。", 503);
+      const object = await env.ASSETS.get(assetMatch[1]);
+      if (!object) return fail("图片不存在", 404);
+      const headers = new Headers();
+      object.writeHttpMetadata(headers);
+      headers.set("etag", object.httpEtag);
+      headers.set("x-content-type-options", "nosniff");
+      headers.set("content-disposition", "inline");
+      headers.set("cache-control", "private, max-age=3600");
+      return new Response(object.body, { headers });
+    }
+
+    if (path === "admin/assets" && method === "GET") {
+      if (user.role !== "admin") return fail("仅管理员可以管理图片资源", 403);
+      if (!env.ASSETS) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      const result = await env.ASSETS.list({ prefix: "img-", limit: 100 });
+      const items = result.objects.map((object: R2Object) => ({
+        key: object.key,
+        url: `/api/assets/${object.key}`,
+        name: object.customMetadata?.originalName || object.key,
+        size: object.size,
+        uploaded_at: object.uploaded.toISOString()
+      }));
+      return json({ items, storageAvailable: true, truncated: result.truncated });
+    }
+
+    if (path === "admin/assets" && method === "POST") {
+      if (user.role !== "admin") return fail("仅管理员可以上传图片", 403);
+      if (!env.ASSETS) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      let form: FormData;
+      try { form = await request.formData(); } catch { return fail("请选择要上传的图片"); }
+      const file = form.get("file");
+      if (!(file instanceof File)) return fail("上传内容中没有有效的图片文件");
+      const extensionByType: Record<string, string> = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+        "image/gif": "gif"
+      };
+      const extension = extensionByType[file.type];
+      if (!extension) return fail("仅支持 PNG、JPEG、WebP 或 GIF 图片");
+      const maxBytes = 5 * 1024 * 1024;
+      if (file.size <= 0) return fail("图片文件为空");
+      if (file.size > maxBytes) return fail("图片不能超过 5 MB");
+      const key = `img-${uid()}.${extension}`;
+      await env.ASSETS.put(key, file.stream(), {
+        httpMetadata: { contentType: file.type, cacheControl: "private, max-age=3600" },
+        customMetadata: {
+          originalName: file.name.slice(0, 160),
+          uploadedBy: user.username,
+          purpose: "admin-library"
+        }
+      });
+      await log(env, user, "上传图片", "图片资源", key, file.name.slice(0, 160) || key);
+      return json({
+        key,
+        url: `/api/assets/${key}`,
+        name: file.name.slice(0, 160) || key,
+        size: file.size,
+        uploaded_at: new Date().toISOString()
+      }, 201);
+    }
+
+    const deleteAssetMatch = path.match(/^admin\/assets\/(img-[a-f0-9-]+\.(?:png|jpg|jpeg|webp|gif))$/i);
+    if (deleteAssetMatch && method === "DELETE") {
+      if (user.role !== "admin") return fail("仅管理员可以删除图片资源", 403);
+      if (!env.ASSETS) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      const key = deleteAssetMatch[1];
+      const object = await env.ASSETS.head(key);
+      if (!object) return fail("图片不存在", 404);
+      await env.ASSETS.delete(key);
+      await log(env, user, "删除图片", "图片资源", key, object.customMetadata?.originalName || key);
+      return json({ ok: true });
+    }
 
     // Modular knowledge base metadata and schema management.
     if (path === "modules" && method === "GET") {
