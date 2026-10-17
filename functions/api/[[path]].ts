@@ -148,6 +148,15 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const maxBytes = 5 * 1024 * 1024;
       if (file.size <= 0) return fail("图片文件为空");
       if (file.size > maxBytes) return fail("图片不能超过 5 MB");
+      // Do not trust the browser-provided MIME type alone: verify the file signature.
+      const signature = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+      const starts = (...bytes: number[]) => bytes.every((value, index) => signature[index] === value);
+      const isPng = starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+      const isJpeg = starts(0xff, 0xd8, 0xff);
+      const isGif = starts(0x47, 0x49, 0x46, 0x38, 0x37, 0x61) || starts(0x47, 0x49, 0x46, 0x38, 0x39, 0x61);
+      const isWebp = starts(0x52, 0x49, 0x46, 0x46) && starts(0x57, 0x45, 0x42, 0x50) && signature.length >= 12;
+      const signatureMatches = extension === "png" ? isPng : extension === "jpg" ? isJpeg : extension === "gif" ? isGif : isWebp;
+      if (!signatureMatches) return fail("文件内容与图片格式不匹配，请重新选择 PNG、JPEG、WebP 或 GIF 图片");
       const key = `img-${uid()}.${extension}`;
       await env.ASSETS.put(key, file.stream(), {
         httpMetadata: { contentType: file.type, cacheControl: "private, max-age=3600" },
