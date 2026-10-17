@@ -2,7 +2,7 @@ interface Env {
   DB: D1Database;
   BOOTSTRAP_ADMIN_USERNAME?: string;
   BOOTSTRAP_ADMIN_PASSWORD?: string;
-  ASSETS?: R2Bucket;
+  MEDIA_BUCKET?: R2Bucket;
 }
 interface User { id: string; username: string; role: "admin" | "member"; active: number; }
 const COOKIE = "mcsha_session";
@@ -104,8 +104,8 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
     // only admins can upload, list, or delete image assets.
     const assetMatch = path.match(/^assets\/(img-[a-f0-9-]+\.(?:png|jpg|jpeg|webp|gif))$/i);
     if (assetMatch && method === "GET") {
-      if (!env.ASSETS) return fail("图片存储尚未配置。管理员需要绑定 Cloudflare R2 存储桶。", 503);
-      const object = await env.ASSETS.get(assetMatch[1]);
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置。管理员需要绑定 Cloudflare R2 存储桶。", 503);
+      const object = await env.MEDIA_BUCKET.get(assetMatch[1]);
       if (!object) return fail("图片不存在", 404);
       const headers = new Headers();
       object.writeHttpMetadata(headers);
@@ -117,8 +117,8 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
     }
 
     if (path === "assets" && method === "GET") {
-      if (!env.ASSETS) return fail("图片存储尚未配置", 503);
-      const result = await env.ASSETS.list({ prefix: "img-", limit: 100 });
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置", 503);
+      const result = await env.MEDIA_BUCKET.list({ prefix: "img-", limit: 100 });
       const items = result.objects.map((object: R2Object) => ({
         key: object.key,
         url: `/api/assets/${object.key}`,
@@ -131,8 +131,8 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
 
     if (path === "admin/assets" && method === "GET") {
       if (user.role !== "admin") return fail("仅管理员可以管理图片资源", 403);
-      if (!env.ASSETS) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
-      const result = await env.ASSETS.list({ prefix: "img-", limit: 100 });
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      const result = await env.MEDIA_BUCKET.list({ prefix: "img-", limit: 100 });
       const items = result.objects.map((object: R2Object) => ({
         key: object.key,
         url: `/api/assets/${object.key}`,
@@ -145,7 +145,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
 
     if (path === "admin/assets" && method === "POST") {
       if (user.role !== "admin") return fail("仅管理员可以上传图片", 403);
-      if (!env.ASSETS) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
       let form: FormData;
       try { form = await request.formData(); } catch { return fail("请选择要上传的图片"); }
       const file = form.get("file");
@@ -171,7 +171,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const signatureMatches = extension === "png" ? isPng : extension === "jpg" ? isJpeg : extension === "gif" ? isGif : isWebp;
       if (!signatureMatches) return fail("文件内容与图片格式不匹配，请重新选择 PNG、JPEG、WebP 或 GIF 图片");
       const key = `img-${uid()}.${extension}`;
-      await env.ASSETS.put(key, file.stream(), {
+      await env.MEDIA_BUCKET.put(key, file.stream(), {
         httpMetadata: { contentType: file.type, cacheControl: "private, max-age=3600" },
         customMetadata: {
           originalName: file.name.slice(0, 160),
@@ -192,11 +192,11 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
     const deleteAssetMatch = path.match(/^admin\/assets\/(img-[a-f0-9-]+\.(?:png|jpg|jpeg|webp|gif))$/i);
     if (deleteAssetMatch && method === "DELETE") {
       if (user.role !== "admin") return fail("仅管理员可以删除图片资源", 403);
-      if (!env.ASSETS) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
+      if (!env.MEDIA_BUCKET) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
       const key = deleteAssetMatch[1];
-      const object = await env.ASSETS.head(key);
+      const object = await env.MEDIA_BUCKET.head(key);
       if (!object) return fail("图片不存在", 404);
-      await env.ASSETS.delete(key);
+      await env.MEDIA_BUCKET.delete(key);
       await log(env, user, "删除图片", "图片资源", key, object.customMetadata?.originalName || key);
       return json({ ok: true });
     }

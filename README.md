@@ -58,7 +58,7 @@ npx wrangler pages secret put BOOTSTRAP_ADMIN_PASSWORD
 管理员图片上传使用 Cloudflare R2 对象存储，文件不存入 D1。
 
 1. 在 Cloudflare 控制台进入 **R2 Object Storage**，创建名称为 `mcsha-codex-assets` 的存储桶（名称需与 `wrangler.toml` 一致）。
-2. 仓库的 `wrangler.toml` 已预留 `ASSETS` 绑定。部署时确认 Pages 项目使用该配置，且 R2 bucket binding 名称为 `ASSETS`。
+2. 仓库的 `wrangler.toml` 已预留 `MEDIA_BUCKET` 绑定。部署时确认 Pages 项目使用该配置，且 R2 bucket binding 名称为 `MEDIA_BUCKET`。
 3. 重新部署后，以管理员身份进入“管理后台”即可上传、预览、复制图片链接和删除资源。
 
 接口仅允许管理员列出、上传或删除图片；图片访问要求登录。当前接受 PNG、JPEG、WebP、GIF，单张最大 5 MB。未配置 R2 时，管理后台会显示明确提示并禁用上传按钮。不要将图片内容或凭据提交到 Git。
