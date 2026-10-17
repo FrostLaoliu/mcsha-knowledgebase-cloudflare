@@ -116,6 +116,19 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       return new Response(object.body, { headers });
     }
 
+    if (path === "assets" && method === "GET") {
+      if (!env.ASSETS) return fail("图片存储尚未配置", 503);
+      const result = await env.ASSETS.list({ prefix: "img-", limit: 100 });
+      const items = result.objects.map((object: R2Object) => ({
+        key: object.key,
+        url: `/api/assets/${object.key}`,
+        name: object.customMetadata?.originalName || object.key,
+        size: object.size,
+        uploaded_at: object.uploaded.toISOString()
+      }));
+      return json({ items, truncated: result.truncated });
+    }
+
     if (path === "admin/assets" && method === "GET") {
       if (user.role !== "admin") return fail("仅管理员可以管理图片资源", 403);
       if (!env.ASSETS) return fail("图片存储尚未配置。请先创建并绑定 R2 存储桶。", 503);
