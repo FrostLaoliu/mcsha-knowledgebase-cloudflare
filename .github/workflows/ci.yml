@@ -1,0 +1,78 @@
+name: Validate MC杀资料库 2.0
+
+on:
+  push:
+    branches:
+      - feature/v2-modular-knowledgebase
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: TypeScript and Vite build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build production assets
+        run: npm run build
+
+  migration:
+    name: Check additive D1 migration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Verify migration preserves existing data
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import sqlite3
+
+          db = sqlite3.connect(':memory:')
+          root = pathlib.Path('.')
+          db.executescript((root / 'migrations/0001_initial.sql').read_text(encoding='utf-8'))
+          db.execute(
+              "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, ?)",
+              ('test-admin', 'admin', 'test-hash', 'admin')
+          )
+          db.execute(
+              "INSERT INTO characters (id, name, health, category, description, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+              ('existing-character', '迁移前角色', 4, '测试角色分类', '保留说明', 'test-admin')
+          )
+          db.execute(
+              "INSERT INTO playbooks (id, title, category, summary, steps_json, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              ('existing-playbook', '迁移前流程', '测试流程分类', '保留摘要', '[\"步骤一\"]', '保留备注', 'test-admin')
+          )
+          db.execute(
+              "INSERT INTO character_versions (id, character_id, version_number, snapshot_json, edited_by, edit_note) VALUES (?, ?, ?, ?, ?, ?)",
+              ('character-v1', 'existing-character', 1, '{\"name\":\"迁移前角色\"}', 'test-admin', '旧版本')
+          )
+          db.execute(
+              "INSERT INTO playbook_versions (id, playbook_id, version_number, snapshot_json, edited_by, edit_note) VALUES (?, ?, ?, ?, ?, ?)",
+              ('playbook-v1', 'existing-playbook', 1, '{\"title\":\"迁移前流程\"}', 'test-admin', '旧版本')
+          )
+          db.commit()
+
+          db.executescript((root / 'migrations/0002_modular_knowledgebase.sql').read_text(encoding='utf-8'))
+
+          assert db.execute("SELECT name FROM characters WHERE id='existing-character'").fetchone()[0] == '迁移前角色'
+          assert db.execute("SELECT title FROM playbooks WHERE id='existing-playbook'").fetchone()[0] == '迁移前流程'
+          assert db.execute("SELECT COUNT(*) FROM character_versions WHERE id='character-v1'").fetchone()[0] == 1
+          assert db.execute("SELECT COUNT(*) FROM playbook_versions WHERE id='playbook-v1'").fetchone()[0] == 1
+          assert db.execute("SELECT COUNT(*) FROM modules").fetchone()[0] == 2
+          categories = {row[0] for row in db.execute("SELECT name FROM module_categories")}
+          assert '测试角色分类' in categories and '测试流程分类' in categories
+          print('Migration validation passed: legacy records and version history are preserved.')
+          PY
