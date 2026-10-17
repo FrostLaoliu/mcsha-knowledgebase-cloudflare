@@ -1,0 +1,15 @@
+name = "mcsha-codex"
+compatibility_date = "2026-10-16"
+pages_build_output_dir = "./dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mcsha-codex-db"
+database_id = "957771f8-2a5c-454f-b390-6dd6c2322929"
+migrations_dir = "migrations"
+
+[vars]
+APP_NAME = "MC杀开发资料库"
+# 首次初始化管理员的凭据请使用 `wrangler secret put BOOTSTRAP_ADMIN_PASSWORD` 设置，
+# 不要把真实密码写进此文件或提交到 Git。
+BOOTSTRAP_ADMIN_USERNAME = "admin"
