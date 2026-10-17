@@ -121,7 +121,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
       const id = uid();
       const fields = Array.isArray(b.fields) ? b.fields.slice(0, 30) : [];
       try {
-        await env.DB.prepare("INSERT INTO modules (id,name,slug,description,icon,source_type,sort_order,created_by) VALUES (?,?,?,?,?,'custom',?,?,?)")
+        await env.DB.prepare("INSERT INTO modules (id,name,slug,description,icon,source_type,sort_order,created_by) VALUES (?,?,?,?,?,'custom',?,?)")
           .bind(id, name, slug, String(b.description || "").slice(0, 500), String(b.icon || "boxes").slice(0, 40), Number(b.sort_order) || 100, user.id).run();
       } catch {
         return fail("模块名称或标识已存在，或模块创建失败", 409);
