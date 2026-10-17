@@ -9,6 +9,7 @@
 - 玩法流程：分类、摘要、步骤、开发备注。
 - 协作记录：记录创建者、编辑者、修改说明与历史快照。
 - 管理后台：创建成员账号、停用/启用账号、重置密码。
+- 图片资源管理：管理员可上传、预览、复制图片地址和删除图片；图片存放在 Cloudflare R2，单张限制 5 MB。
 - 所有登录成员可以查看和编辑共享内容；管理员额外管理账号。
 - 暗色响应式界面，适配桌面与手机。
 
@@ -52,7 +53,17 @@ npx wrangler pages secret put BOOTSTRAP_ADMIN_PASSWORD
 
 如果希望修改管理员用户名，在 `wrangler.toml` 中修改 `BOOTSTRAP_ADMIN_USERNAME` 后重新部署；初始化完成后，修改该变量不会重命名已经存在的账号。
 
-### 4. 部署
+### 4. 配置图片存储（R2）
+
+管理员图片上传使用 Cloudflare R2 对象存储，文件不存入 D1。
+
+1. 在 Cloudflare 控制台进入 **R2 Object Storage**，创建名称为 `mcsha-codex-assets` 的存储桶（名称需与 `wrangler.toml` 一致）。
+2. 仓库的 `wrangler.toml` 已预留 `ASSETS` 绑定。部署时确认 Pages 项目使用该配置，且 R2 bucket binding 名称为 `ASSETS`。
+3. 重新部署后，以管理员身份进入“管理后台”即可上传、预览、复制图片链接和删除资源。
+
+接口仅允许管理员列出、上传或删除图片；图片访问要求登录。当前接受 PNG、JPEG、WebP、GIF，单张最大 5 MB。未配置 R2 时，管理后台会显示明确提示并禁用上传按钮。不要将图片内容或凭据提交到 Git。
+
+### 5. 部署
 
 ```bash
 npm install
